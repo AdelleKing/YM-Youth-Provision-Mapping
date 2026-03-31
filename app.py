@@ -15,6 +15,7 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
+import time
 
 # Google Sheets / Drive
 import gspread
@@ -49,40 +50,26 @@ st.set_page_config(
 # DATA LOADING & SAVING (GOOGLE SHEETS BACKEND)
 # ---------------------------------------------------------------
 
-@st.cache_data
+@st.cache_resource
 def get_gsheet_client():
     """
-    Authorise and return a gspread client using a service account
-    stored in Streamlit secrets.
-
-    Required secrets structure:
-
-    [gcp_service_account]
-    type = "service_account"
-    project_id = "..."
-    private_key_id = "..."
-    private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
-    client_email = "your-service-account@project.iam.gserviceaccount.com"
-    client_id = "..."
-    token_uri = "https://oauth2.googleapis.com/token"
-
-    [gdrive]
-    sheet_id = "YOUR_SHEET_ID"          # from the Google Sheet URL
-    worksheet_name = "Sheet1"           # or whatever your tab is called
+    Create a gspread client directly from the service account dict
+    stored in Streamlit secrets, using gspread's own helper.
     """
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
+    creds_dict = st.secrets["gcp_service_account"]
 
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"], scopes=scopes
+    client = gspread.service_account_from_dict(
+        creds_dict,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
     )
-    client = gspread.authorize(creds)
     return client
 
 
-@st.cache_data
+
+
 def load_data_from_gsheet() -> pd.DataFrame:
     """
     Load the activities data from a Google Sheet on Google Drive.
@@ -349,7 +336,8 @@ def main():
         use_container_width=True,
     )
 
-    # -----------------------
+
+# -----------------------
     # FORM: ADD NEW ACTIVITY (INSIDE EXPANDER)
     # -----------------------
     with st.expander("Add a new activity in Medway"):
@@ -358,7 +346,8 @@ def main():
             "On submit, your entry is saved to the directory and will appear in the map and list."
         )
 
-        with st.form(key="add_activity_form"):
+        # clear_on_submit=True will clear the form fields after a successful submit
+        with st.form(key="add_activity_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
 
             with col1:
@@ -371,7 +360,7 @@ def main():
                     "Type detail (e.g. 'Outdoor Activities', 'Life Skills')"
                 )
                 day = st.text_input("Day (e.g. 'Monday', 'Wednesday', 'Check website')")
-                time = st.text_input("Time (e.g. '18:00-20:00')")
+                activity_time = st.text_input("Time (e.g. '18:00-20:00')")
 
             with col2:
                 address = st.text_input("Address")
@@ -395,22 +384,23 @@ def main():
             submitted = st.form_submit_button("Add activity")
 
             if submitted:
-                # Basic validation: require name + coordinates
+                # Basic validation: require name + some location info
                 if not activity_name:
                     st.error("Please provide at least an activity name.")
+                elif not (address or postcode):
+                    st.error("Please provide at least an address or postcode so we can locate this on the map.")
                 else:
                     # Reload original data before appending, to minimise overwrite risk
                     current_df = load_data_from_gsheet()
 
                     # Build new row as a dict.
-                    # Only setting the key fields we care about; other columns will be NaN.
                     new_row = {
                         "Activity Name": activity_name,
                         "Organisation": organisation,
                         "Activity Type": activity_type_input,
                         "Type": type_detail,
                         "Day": day,
-                        "Time": time,
+                        "Time": activity_time,
                         "Address": address,
                         "Region": region,
                         "Postcode": postcode,
@@ -429,11 +419,9 @@ def main():
                     # Save back to Google Sheet
                     save_data_to_gsheet(updated_df)
 
-                    st.success("New activity added successfully! The map and list will refresh.")
-
-                    # Force a rerun so the new row appears immediately
+                    # Feedback & refresh
+                    st.toast("New activity added successfully!", icon="🎉")
+                    time.sleep(0.5)
                     st.rerun()
-
-
 if __name__ == "__main__":
     main()
