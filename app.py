@@ -50,7 +50,7 @@ st.set_page_config(
 # DATA LOADING & SAVING (GOOGLE SHEETS BACKEND)
 # ---------------------------------------------------------------
 
-@st.cache_resource
+
 def get_gsheet_client():
     """
     Create a gspread client directly from the service account dict
