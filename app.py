@@ -1,21 +1,25 @@
-
 # -----------------------------
 # Medway Activities Explorer
 # -----------------------------
 # Purpose:
 # - Visualise activities on a Leaflet map (via folium)
 # - Filter by location, day, activity type, age range label
-# - Allow users to submit new activities, append to the same CSV
-# - No external DB; CSV is the single source of truth
+# - Allow users to submit new activities, append to a Google Sheet
+# - No external DB; Google Sheet is the single source of truth
 #
 # Requirements:
-# pip install streamlit pandas folium streamlit-folium
+# pip install streamlit pandas folium streamlit-folium gspread google-auth
 # -----------------------------
 
 import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
+
+# Google Sheets / Drive
+import gspread
+from google.oauth2.service_account import Credentials
+
 
 # ---------------------------------------------------------------
 # BASIC CONFIG
@@ -24,10 +28,6 @@ st.set_page_config(
     page_title="Medway Youth Activities Map",
     layout="wide",
 )
-
-# Path to your CSV file.
-# Make sure this matches the actual filename in your project folder.
-DATA_PATH = "Youth Provisions.xlsx - Overview.csv"
 
 # ---------------------------------------------------------------
 # AUTH PLACEHOLDER (COMMENTED OUT FOR NOW)
@@ -43,24 +43,66 @@ DATA_PATH = "Youth Provisions.xlsx - Overview.csv"
 # if not check_user_logged_in():
 #     st.error("Please log in to access this app.")
 #     st.stop()
-#
+
+
 # ---------------------------------------------------------------
-# DATA LOADING & SAVING
+# DATA LOADING & SAVING (GOOGLE SHEETS BACKEND)
 # ---------------------------------------------------------------
 
 @st.cache_data
-def load_data(csv_path: str) -> pd.DataFrame:
+def get_gsheet_client():
     """
-    Load the activities CSV into a pandas DataFrame.
-    - Strips whitespace from column names.
-    - Coerces Latitude/Longitude to numeric.
+    Authorise and return a gspread client using a service account
+    stored in Streamlit secrets.
+
+    Required secrets structure:
+
+    [gcp_service_account]
+    type = "service_account"
+    project_id = "..."
+    private_key_id = "..."
+    private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+    client_email = "your-service-account@project.iam.gserviceaccount.com"
+    client_id = "..."
+    token_uri = "https://oauth2.googleapis.com/token"
+
+    [gdrive]
+    sheet_id = "YOUR_SHEET_ID"          # from the Google Sheet URL
+    worksheet_name = "Sheet1"           # or whatever your tab is called
     """
-    df = pd.read_csv(csv_path)
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], scopes=scopes
+    )
+    client = gspread.authorize(creds)
+    return client
+
+
+@st.cache_data
+def load_data_from_gsheet() -> pd.DataFrame:
+    """
+    Load the activities data from a Google Sheet on Google Drive.
+    """
+    client = get_gsheet_client()
+
+    sheet_id = st.secrets["gdrive"]["sheet_id"]
+    worksheet_name = st.secrets["gdrive"]["worksheet_name"]
+
+    sh = client.open_by_key(sheet_id)
+    ws = sh.worksheet(worksheet_name)
+
+    # Get all rows as list[dict] then convert to DataFrame
+    records = ws.get_all_records()
+    df = pd.DataFrame(records)
 
     # Normalise column names (remove trailing spaces etc.)
     df.columns = [c.strip() for c in df.columns]
 
-    # Ensure Latitude/Longitude exist even if missing in some rows
+    # Ensure Latitude/Longitude exist and are numeric
     if "Latitude" in df.columns:
         df["Latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
     else:
@@ -74,12 +116,24 @@ def load_data(csv_path: str) -> pd.DataFrame:
     return df
 
 
-def save_data(df: pd.DataFrame, csv_path: str) -> None:
+def save_data_to_gsheet(df: pd.DataFrame) -> None:
     """
-    Persist the DataFrame back to CSV.
-    This is your 'write' layer instead of a database.
+    Overwrite the Google Sheet with the current DataFrame contents.
+    For now this replaces the whole sheet – simple and predictable.
     """
-    df.to_csv(csv_path, index=False)
+    client = get_gsheet_client()
+
+    sheet_id = st.secrets["gdrive"]["sheet_id"]
+    worksheet_name = st.secrets["gdrive"]["worksheet_name"]
+
+    sh = client.open_by_key(sheet_id)
+    ws = sh.worksheet(worksheet_name)
+
+    # Convert DataFrame to rows: first row = headers
+    data = [df.columns.tolist()] + df.astype(str).values.tolist()
+
+    ws.clear()
+    ws.update(data)
 
 
 # ---------------------------------------------------------------
@@ -149,7 +203,7 @@ def create_map(df: pd.DataFrame) -> folium.Map:
     always centred on Medway.
     """
 
-    # Fixed Medway centre – this is roughly central Chatham / Medway
+    # Fixed Medway centre – roughly central Chatham / Medway
     center_lat, center_lon = 51.385, 0.53
 
     # Filter rows with valid coordinates
@@ -187,13 +241,14 @@ def create_map(df: pd.DataFrame) -> folium.Map:
 
     return m
 
+
 # ---------------------------------------------------------------
 # APP LAYOUT
 # ---------------------------------------------------------------
 
 def main():
-    # Load data
-    df = load_data(DATA_PATH)
+    # Load data from Google Sheet
+    df = load_data_from_gsheet()
 
     st.title("Medway Youth Activities Map")
     st.write(
@@ -240,7 +295,7 @@ def main():
         "Age range label:",
         options=age_ranges,
         default=[],
-        help="These are the age labels exactly as stored in the CSV (e.g. '13-18', '8+').",
+        help="These are the age labels exactly as stored in the data (e.g. '13-18', '8+').",
     )
 
     # Apply filters
@@ -252,17 +307,16 @@ def main():
         selected_age_ranges=selected_age_ranges,
     )
 
-# -----------------------
-# FULL-WIDTH MAP
-# -----------------------
+    # -----------------------
+    # FULL-WIDTH MAP
+    # -----------------------
     st.subheader("Map view")
     m = create_map(filtered_df)
     st_folium(m, width=None, height=600)  # width=None makes it expand full width
 
-# -----------------------
-# ACTIVITIES LIST UNDER MAP
-# -----------------------
-    
+    # -----------------------
+    # ACTIVITIES LIST UNDER MAP
+    # -----------------------
     cols_to_show = [
         col
         for col in [
@@ -278,9 +332,9 @@ def main():
             "Organisation",
             "Email",
             "Website",
-        ] if col in filtered_df.columns
+        ]
+        if col in filtered_df.columns
     ]
-  
 
     st.subheader(f"Activities list ({len(filtered_df)} found)")
     st.dataframe(
@@ -289,13 +343,12 @@ def main():
     )
 
     # -----------------------
-    # FORM: ADD NEW ACTIVITY
+    # FORM: ADD NEW ACTIVITY (INSIDE EXPANDER)
     # -----------------------
     with st.expander("Add a new activity in Medway"):
-
         st.caption(
             "Use this form to add a new activity. "
-            "On submit, your entry is appended to the CSV and will appear in the map and list."
+            "On submit, your entry is saved to the directory and will appear in the map and list."
         )
 
         with st.form(key="add_activity_form"):
@@ -317,7 +370,9 @@ def main():
                 address = st.text_input("Address")
                 region = st.text_input("Region / Town (e.g. Gillingham, Chatham)")
                 postcode = st.text_input("Postcode")
-                age_range_label = st.text_input("Age range label (e.g. '13-18', '8+', 'All ages')")
+                age_range_label = st.text_input(
+                    "Age range label (e.g. '13-18', '8+', 'All ages')"
+                )
                 latitude = st.number_input(
                     "Latitude (decimal degrees) *",
                     format="%.6f",
@@ -338,7 +393,7 @@ def main():
                     st.error("Please provide at least an activity name.")
                 else:
                     # Reload original data before appending, to minimise overwrite risk
-                    current_df = load_data(DATA_PATH)
+                    current_df = load_data_from_gsheet()
 
                     # Build new row as a dict.
                     # Only setting the key fields we care about; other columns will be NaN.
@@ -364,8 +419,8 @@ def main():
                         ignore_index=True,
                     )
 
-                    # Save back to CSV
-                    save_data(updated_df, DATA_PATH)
+                    # Save back to Google Sheet
+                    save_data_to_gsheet(updated_df)
 
                     st.success("New activity added successfully! The map and list will refresh.")
 
@@ -375,4 +430,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
