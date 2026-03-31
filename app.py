@@ -234,10 +234,17 @@ def create_map(df: pd.DataFrame) -> folium.Map:
         <b>Address:</b> {address}, {region}<br/>
         """
 
-        folium.Marker(
+       
+        folium.CircleMarker(
             location=[lat, lon],
+            radius=9,
+            color="red",
+            fill=True,
+            fill_color="red",
+            fill_opacity=1.0,
             popup=popup_html,
-        ).add_to(m)
+            ).add_to(m)
+
 
     return m
 
